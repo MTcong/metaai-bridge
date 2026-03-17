@@ -22,6 +22,8 @@ This project was built by reverse-engineering the browser flow used by `https://
 - `POST /download/batch` → download many assets to local storage
 - `POST /image/download` → generate images and save them locally in one call
 - `POST /video/download` → generate videos and save them locally in one call
+- `POST /image-to-video` → generate a video from an existing image/media entity
+- `POST /image-to-video/download` → generate a video from an image and save it locally in one call
 - Docker support
 - clean `.env.example` for self-setup
 
@@ -365,6 +367,47 @@ curl -X POST http://127.0.0.1:18081/video/download \
     "poll_attempts":12,
     "poll_interval_seconds":5,
     "subdir":"video-runs",
+    "filename_prefix":"clip"
+  }'
+```
+
+---
+
+## 8) Generate video from an image/media item
+
+### `POST /image-to-video`
+
+```bash
+curl -X POST http://127.0.0.1:18081/image-to-video \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source_media_ent_id":"913199711508625",
+    "source_media_url":"blob:https://meta.ai/ed8e0c9f-d9b3-4026-a911-7d4e7dd3a67f",
+    "prompt":"play guitar",
+    "timeout_seconds":180,
+    "poll_attempts":12,
+    "poll_interval_seconds":5
+  }'
+```
+
+Notes:
+- `source_media_ent_id` is the key field.
+- `source_media_url` can help, but Meta may still resolve via the entity id.
+- `conversation_id`, `entry_point`, `current_branch_path`, and `is_new_conversation` can be passed when reproducing a specific browser flow.
+
+### `POST /image-to-video/download`
+
+```bash
+curl -X POST http://127.0.0.1:18081/image-to-video/download \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source_media_ent_id":"913199711508625",
+    "source_media_url":"blob:https://meta.ai/ed8e0c9f-d9b3-4026-a911-7d4e7dd3a67f",
+    "prompt":"play guitar",
+    "timeout_seconds":180,
+    "poll_attempts":12,
+    "poll_interval_seconds":5,
+    "subdir":"image-to-video-runs",
     "filename_prefix":"clip"
   }'
 ```

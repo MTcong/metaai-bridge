@@ -67,6 +67,11 @@ class VideoDownloadRequest(VideoRequest):
     filename_prefix: str = Field(default="video")
 
 
+class ImageToVideoDownloadRequest(ImageToVideoRequest):
+    subdir: str = Field(default="image-to-video")
+    filename_prefix: str = Field(default="image-to-video")
+
+
 class MetaBridge:
     def __init__(self) -> None:
         self.cookie_string = self._build_cookie_string()
@@ -506,6 +511,28 @@ def image_download(body: ImageDownloadRequest) -> Dict:
 def video_download(body: VideoDownloadRequest) -> Dict:
     result = bridge.generate_video(
         body.prompt,
+        body.timeout_seconds,
+        body.poll_attempts,
+        body.poll_interval_seconds,
+    )
+    urls = result.get("video_urls", [])
+    download_result = bridge.batch_download_media(urls, body.subdir, body.filename_prefix)
+    return {
+        **result,
+        "download": download_result,
+    }
+
+
+@app.post("/image-to-video/download")
+def image_to_video_download(body: ImageToVideoDownloadRequest) -> Dict:
+    result = bridge.generate_image_to_video(
+        body.source_media_ent_id,
+        body.prompt,
+        body.source_media_url,
+        body.conversation_id,
+        body.is_new_conversation,
+        body.entry_point,
+        body.current_branch_path,
         body.timeout_seconds,
         body.poll_attempts,
         body.poll_interval_seconds,
