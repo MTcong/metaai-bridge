@@ -11,7 +11,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 
 META_BASE = "https://meta.ai"
@@ -29,7 +29,7 @@ META_PROMPT_URL_RE = re.compile(r"https://meta\.ai/prompt/[^\"'\\\s<>]+")
 DOWNLOAD_DIR = Path(os.getenv("META_DOWNLOAD_DIR", "/app/downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="Meta AI Bridge", version="1.0.0")
+app = FastAPI(title="Meta AI Bridge", version="1.1.0")
 
 
 class ImageRequest(BaseModel):
@@ -40,6 +40,19 @@ class ImageRequest(BaseModel):
 
 class VideoRequest(BaseModel):
     prompt: str
+    timeout_seconds: int = Field(default=180, ge=15, le=300)
+    poll_attempts: int = Field(default=12, ge=1, le=30)
+    poll_interval_seconds: int = Field(default=5, ge=1, le=30)
+
+
+class ImageToVideoRequest(BaseModel):
+    source_media_ent_id: str
+    prompt: str
+    source_media_url: Optional[str] = None
+    conversation_id: Optional[str] = None
+    is_new_conversation: bool = True
+    entry_point: str = Field(default="KADABRA__UNKNOWN")
+    current_branch_path: Optional[str] = "0"
     timeout_seconds: int = Field(default=180, ge=15, le=300)
     poll_attempts: int = Field(default=12, ge=1, le=30)
     poll_interval_seconds: int = Field(default=5, ge=1, le=30)
@@ -57,14 +70,15 @@ class BatchDownloadRequest(BaseModel):
     prefix: str = Field(default="media")
 
 
-class ImageDownloadRequest(ImageRequest):
-    subdir: str = Field(default="images")
-    filename_prefix: str = Field(default="image")
-
-
-class VideoDownloadRequest(VideoRequest):
-    subdir: str = Field(default="videos")
-    filename_prefix: str = Field(default="video")
+class UploadResponse(BaseModel):
+    success: bool
+    source_media_ent_id: Optional[str] = None
+    upload_session_id: Optional[str] = None
+    file_name: Optional[str] = None
+    file_size: Optional[int] = None
+    mime_type: Optional[str] = None
+    raw_response: Optional[dict] = None
+    error: Optional[str] = None
 
 
 class ImageToVideoDownloadRequest(ImageToVideoRequest):
@@ -153,8 +167,20 @@ class MetaBridge:
     def _random_large_int_str(self) -> str:
         return str(random.randint(10**18, 10**19 - 1))
 
-    def _build_payload(self, prompt: str, operation: str, orientation: Optional[str] = None) -> Dict:
-        conversation_id = self._random_id()
+    def _build_payload(
+        self,
+        prompt: str,
+        operation: str,
+        orientation: Optional[str] = None,
+        *,
+        source_media_ent_id: Optional[str] = None,
+        source_media_url: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        is_new_conversation: bool = True,
+        entry_point: str = "KADABRA__UNKNOWN",
+        current_branch_path: Optional[str] = "0",
+    ) -> Dict:
+        conversation_id = conversation_id or self._random_id()
         user_message_id = self._random_id()
         assistant_message_id = self._random_id()
         turn_id = self._random_id()
@@ -169,9 +195,19 @@ class MetaBridge:
                 "prompt": prompt,
                 "orientation": orientation or "VERTICAL",
             }
-        else:
+        elif operation == "TEXT_TO_VIDEO":
             content_value = f"Tạo hoạt ảnh cho {prompt}"
             imagine_request["textToImageParams"] = {"prompt": prompt}
+        elif operation == "IMAGE_TO_VIDEO":
+            content_value = prompt
+            imagine_request["imageToVideoParams"] = {
+                "sourceMediaEntId": source_media_ent_id,
+                "sourceMediaUrl": source_media_url,
+                "prompt": prompt,
+                "numMedia": 1,
+            }
+        else:
+            raise ValueError(f"Unsupported operation: {operation}")
 
         return {
             "doc_id": GENERATE_DOC_ID,
@@ -187,7 +223,7 @@ class MetaBridge:
                 "attachments": None,
                 "mentions": None,
                 "clippyIp": None,
-                "isNewConversation": True,
+                "isNewConversation": is_new_conversation,
                 "imagineOperationRequest": imagine_request,
                 "qplJoinId": None,
                 "clientTimezone": os.getenv("TZ", "Asia/Bangkok"),
@@ -195,12 +231,12 @@ class MetaBridge:
                 "clientLatitude": None,
                 "clientLongitude": None,
                 "devicePixelRatio": None,
-                "entryPoint": "KADABRA__UNKNOWN",
+                "entryPoint": entry_point,
                 "promptSessionId": prompt_session_id,
                 "promptType": None,
                 "conversationStarterId": None,
                 "userAgent": os.getenv("META_USER_AGENT", DEFAULT_UA),
-                "currentBranchPath": "0",
+                "currentBranchPath": current_branch_path,
                 "promptEditType": "new_message",
                 "userLocale": "vi-VN",
                 "userEventId": None,
@@ -291,7 +327,11 @@ class MetaBridge:
                 except json.JSONDecodeError:
                     continue
                 events.append(obj)
-                cid = obj.get("data", {}).get("sendMessageStream", {}).get("conversationId")
+                cid = (
+                    obj.get("data", {})
+                    .get("sendMessageStream", {})
+                    .get("conversationId")
+                )
                 if cid:
                     conversation_id = cid
             elif line.startswith("event:") and "complete" in line.lower():
@@ -305,7 +345,7 @@ class MetaBridge:
             "complete_seen": complete_seen,
         }
 
-    def _fetch_prompt_page_once(self, conversation_id: str, timeout_seconds: int) -> str:
+    def _fetch_prompt_page(self, conversation_id: str, timeout_seconds: int) -> str:
         token_chars = string.ascii_lowercase + string.digits
         responses = []
         for mode in ("prefetch", "full"):
@@ -316,7 +356,11 @@ class MetaBridge:
                 prefetch=(mode == "prefetch"),
                 full_state=(mode == "full"),
             )
-            response = requests.get(url, headers=headers, timeout=(20, timeout_seconds))
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=(20, timeout_seconds),
+            )
             response.raise_for_status()
             responses.append(response.text)
         return "\n".join(responses)
@@ -342,6 +386,61 @@ class MetaBridge:
         prompt_urls = [m.replace("\\u0026", "&") for m in META_PROMPT_URL_RE.findall(text)]
         return self._unique(video_like + create_urls + prompt_urls)
 
+    def _extract_access_token(self) -> str:
+        env_token = os.getenv("META_AI_ACCESS_TOKEN", "").strip()
+        if env_token:
+            return env_token
+        page_headers = self._common_headers().copy()
+        response = requests.get(META_BASE, headers=page_headers, timeout=(20, 60))
+        response.raise_for_status()
+        match = re.search(r'accessToken\\":\\"(ecto1:[^"\\]+)', response.text)
+        if not match:
+            raise RuntimeError("Could not extract Meta access token from page HTML")
+        return match.group(1)
+
+    def upload_image_file(self, file_bytes: bytes, filename: str, mime_type: str) -> Dict:
+        validation_error = self.validate()
+        if validation_error:
+            raise HTTPException(status_code=400, detail=validation_error)
+
+        access_token = self._extract_access_token()
+        upload_session_id = str(uuid.uuid4())
+        safe_name = Path(filename).name or f"upload-{uuid.uuid4().hex[:8]}.jpg"
+        headers = {
+            "accept": "*/*",
+            "accept-language": os.getenv("META_ACCEPT_LANGUAGE", DEFAULT_ACCEPT_LANGUAGE),
+            "authorization": f"OAuth {access_token}",
+            "desired_upload_handler": "genai_document",
+            "ecto_auth_token": "true",
+            "is_abra_user": "true",
+            "offset": "0",
+            "origin": META_BASE,
+            "referer": META_BASE + "/",
+            "user-agent": os.getenv("META_USER_AGENT", DEFAULT_UA),
+            "x-entity-length": str(len(file_bytes)),
+            "x-entity-name": safe_name,
+            "x-entity-type": mime_type,
+        }
+        response = requests.post(
+            f"https://rupload.meta.ai/gen_ai_document_gen_ai_tenant/{upload_session_id}",
+            headers=headers,
+            data=file_bytes,
+            timeout=(20, 180),
+        )
+        response.raise_for_status()
+        data = response.json()
+        media_id = data.get("media_id") or data.get("mediaId") or data.get("id")
+        return {
+            "success": bool(media_id),
+            "source_media_ent_id": str(media_id) if media_id else None,
+            "upload_session_id": upload_session_id,
+            "file_name": safe_name,
+            "file_size": len(file_bytes),
+            "mime_type": mime_type,
+            "raw_response": data,
+            "error": None if media_id else f"Upload succeeded but media_id not found: {data}",
+        }
+
     def _download_file(self, url: str, filename: Optional[str], subdir: str) -> Dict:
         safe_subdir = re.sub(r"[^a-zA-Z0-9_.-]", "_", subdir).strip("._") or "default"
         target_dir = DOWNLOAD_DIR / safe_subdir
@@ -351,10 +450,7 @@ class MetaBridge:
             url,
             stream=True,
             timeout=(20, 180),
-            headers={
-                "user-agent": os.getenv("META_USER_AGENT", DEFAULT_UA),
-                "referer": META_BASE + "/",
-            },
+            headers={"user-agent": os.getenv("META_USER_AGENT", DEFAULT_UA), "referer": META_BASE + "/"},
         )
         response.raise_for_status()
 
@@ -392,7 +488,7 @@ class MetaBridge:
 
         payload = self._build_payload(prompt, "TEXT_TO_IMAGE", orientation)
         stream_result = self._stream_generate(payload, timeout_seconds)
-        prompt_body = self._fetch_prompt_page_once(stream_result["conversation_id"], timeout_seconds)
+        prompt_body = self._fetch_prompt_page(stream_result["conversation_id"], timeout_seconds)
         image_urls = self._extract_image_urls(prompt_body)
 
         if not image_urls:
@@ -408,17 +504,12 @@ class MetaBridge:
             "event_count": len(stream_result["events"]),
         }
 
-    def generate_video(self, prompt: str, timeout_seconds: int, poll_attempts: int, poll_interval_seconds: int) -> Dict:
-        validation_error = self.validate()
-        if validation_error:
-            raise HTTPException(status_code=400, detail=validation_error)
-
-        payload = self._build_payload(prompt, "TEXT_TO_VIDEO")
+    def _resolve_video_result(self, payload: Dict, timeout_seconds: int, poll_attempts: int, poll_interval_seconds: int, *, note: str) -> Dict:
         stream_result = self._stream_generate(payload, timeout_seconds)
 
         video_urls: List[str] = []
         for attempt in range(1, poll_attempts + 1):
-            prompt_body = self._fetch_prompt_page_once(stream_result["conversation_id"], timeout_seconds)
+            prompt_body = self._fetch_prompt_page(stream_result["conversation_id"], timeout_seconds)
             video_urls = self._extract_video_urls(prompt_body)
             if video_urls:
                 break
@@ -437,8 +528,57 @@ class MetaBridge:
             "complete_seen": stream_result["complete_seen"],
             "event_count": len(stream_result["events"]),
             "poll_attempts_used": poll_attempts,
-            "note": "Video flow auto-polls prompt state until mp4 links appear or attempts are exhausted.",
+            "note": note,
         }
+
+    def generate_video(self, prompt: str, timeout_seconds: int, poll_attempts: int, poll_interval_seconds: int) -> Dict:
+        validation_error = self.validate()
+        if validation_error:
+            raise HTTPException(status_code=400, detail=validation_error)
+
+        payload = self._build_payload(prompt, "TEXT_TO_VIDEO")
+        return self._resolve_video_result(
+            payload,
+            timeout_seconds,
+            poll_attempts,
+            poll_interval_seconds,
+            note="Video flow auto-polls prompt state until mp4 links appear or attempts are exhausted.",
+        )
+
+    def generate_image_to_video(
+        self,
+        source_media_ent_id: str,
+        prompt: str,
+        source_media_url: Optional[str],
+        conversation_id: Optional[str],
+        is_new_conversation: bool,
+        entry_point: str,
+        current_branch_path: Optional[str],
+        timeout_seconds: int,
+        poll_attempts: int,
+        poll_interval_seconds: int,
+    ) -> Dict:
+        validation_error = self.validate()
+        if validation_error:
+            raise HTTPException(status_code=400, detail=validation_error)
+
+        payload = self._build_payload(
+            prompt,
+            "IMAGE_TO_VIDEO",
+            source_media_ent_id=source_media_ent_id,
+            source_media_url=source_media_url,
+            conversation_id=conversation_id,
+            is_new_conversation=is_new_conversation,
+            entry_point=entry_point,
+            current_branch_path=current_branch_path,
+        )
+        return self._resolve_video_result(
+            payload,
+            timeout_seconds,
+            poll_attempts,
+            poll_interval_seconds,
+            note="Image-to-video flow auto-polls prompt state until mp4 links appear or attempts are exhausted.",
+        )
 
     def download_media(self, url: str, filename: Optional[str], subdir: str) -> Dict:
         return self._download_file(url, filename, subdir)
@@ -483,6 +623,32 @@ def video(body: VideoRequest) -> Dict:
     )
 
 
+@app.post("/image-to-video")
+def image_to_video(body: ImageToVideoRequest) -> Dict:
+    return bridge.generate_image_to_video(
+        body.source_media_ent_id,
+        body.prompt,
+        body.source_media_url,
+        body.conversation_id,
+        body.is_new_conversation,
+        body.entry_point,
+        body.current_branch_path,
+        body.timeout_seconds,
+        body.poll_attempts,
+        body.poll_interval_seconds,
+    )
+
+
+@app.post("/upload")
+async def upload(file: UploadFile = File(...)) -> Dict:
+    content = await file.read()
+    mime_type = file.content_type or "application/octet-stream"
+    try:
+        return bridge.upload_image_file(content, file.filename or "upload.bin", mime_type)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/download")
 def download(body: DownloadRequest) -> Dict:
     try:
@@ -494,33 +660,6 @@ def download(body: DownloadRequest) -> Dict:
 @app.post("/download/batch")
 def download_batch(body: BatchDownloadRequest) -> Dict:
     return bridge.batch_download_media(body.urls, body.subdir, body.prefix)
-
-
-@app.post("/image/download")
-def image_download(body: ImageDownloadRequest) -> Dict:
-    result = bridge.generate_image(body.prompt, body.orientation, body.timeout_seconds)
-    urls = result.get("image_urls", [])
-    download_result = bridge.batch_download_media(urls, body.subdir, body.filename_prefix)
-    return {
-        **result,
-        "download": download_result,
-    }
-
-
-@app.post("/video/download")
-def video_download(body: VideoDownloadRequest) -> Dict:
-    result = bridge.generate_video(
-        body.prompt,
-        body.timeout_seconds,
-        body.poll_attempts,
-        body.poll_interval_seconds,
-    )
-    urls = result.get("video_urls", [])
-    download_result = bridge.batch_download_media(urls, body.subdir, body.filename_prefix)
-    return {
-        **result,
-        "download": download_result,
-    }
 
 
 @app.post("/image-to-video/download")

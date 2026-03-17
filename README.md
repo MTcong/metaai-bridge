@@ -198,6 +198,11 @@ curl http://127.0.0.1:18081/healthz
 
 ### `POST /image`
 
+Meta image generation currently supports 3 orientations:
+- `VERTICAL`
+- `LANDSCAPE`
+- `SQUARE`
+
 #### Request
 
 ```json
@@ -285,6 +290,36 @@ curl -X POST http://127.0.0.1:18081/video \
 ```
 
 ---
+
+## Upload support
+
+### `POST /upload`
+
+This endpoint uploads an image to Meta AI and returns a `source_media_ent_id` that can be used with `POST /image-to-video`.
+
+Important:
+- upload flow may require a valid `META_AI_ACCESS_TOKEN` (`ecto1:...`) in addition to browser cookies
+- this token can expire and may need refreshing
+
+Example using curl:
+
+```bash
+curl -X POST http://127.0.0.1:18081/upload \
+  -F "file=@./example.jpg"
+```
+
+Typical response:
+
+```json
+{
+  "success": true,
+  "source_media_ent_id": "123456789012345",
+  "upload_session_id": "...",
+  "file_name": "example.jpg",
+  "file_size": 100203,
+  "mime_type": "image/jpeg"
+}
+```
 
 ## 4) Download one asset
 
