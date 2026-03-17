@@ -1,0 +1,11 @@
+services:
+  metaai-bridge:
+    build: .
+    container_name: metaai-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:18081:8000"
+    volumes:
+      - ./downloads:/app/downloads
