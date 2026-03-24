@@ -496,9 +496,17 @@ class MetaBridge:
                 image_urls.extend(self._extract_image_urls(line))
             image_urls = self._unique(image_urls)
 
+        cid = stream_result["conversation_id"]
+        try:
+            (DEBUG_DIR / f"{cid}-prompt-body.txt").write_text(prompt_body)
+            (DEBUG_DIR / f"{cid}-raw-lines.txt").write_text("\n".join(stream_result["raw_lines"]))
+            (DEBUG_DIR / f"{cid}-events.json").write_text(json.dumps(stream_result["events"], ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+
         return {
             "success": len(image_urls) > 0,
-            "conversation_id": stream_result["conversation_id"],
+            "conversation_id": cid,
             "image_urls": image_urls,
             "complete_seen": stream_result["complete_seen"],
             "event_count": len(stream_result["events"]),
