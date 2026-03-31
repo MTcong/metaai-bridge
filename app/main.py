@@ -86,6 +86,23 @@ class ImageToVideoDownloadRequest(ImageToVideoRequest):
     filename_prefix: str = Field(default="image-to-video")
 
 
+class ImageDownloadRequest(BaseModel):
+    prompt: str
+    orientation: str = Field(default="VERTICAL")
+    timeout_seconds: int = Field(default=90, ge=15, le=300)
+    subdir: str = Field(default="default")
+    filename_prefix: str = Field(default="image")
+
+
+class VideoDownloadRequest(BaseModel):
+    prompt: str
+    timeout_seconds: int = Field(default=180, ge=15, le=300)
+    poll_attempts: int = Field(default=12, ge=1, le=30)
+    poll_interval_seconds: int = Field(default=5, ge=1, le=30)
+    subdir: str = Field(default="default")
+    filename_prefix: str = Field(default="video")
+
+
 class MetaBridge:
     def __init__(self) -> None:
         self.cookie_string = self._build_cookie_string()
@@ -668,6 +685,53 @@ def download(body: DownloadRequest) -> Dict:
 @app.post("/download/batch")
 def download_batch(body: BatchDownloadRequest) -> Dict:
     return bridge.batch_download_media(body.urls, body.subdir, body.prefix)
+
+
+@app.post("/image/download")
+def image_download(body: ImageDownloadRequest) -> Dict:
+    # Step 1: Generate image
+    result = bridge.generate_image(body.prompt, body.orientation, body.timeout_seconds)
+    
+    if not result.get("success") or not result.get("image_urls"):
+        return {
+            **result,
+            "download": {"success": False, "error": "Image generation failed"}
+        }
+    
+    # Step 2: Download images
+    urls = result.get("image_urls", [])
+    download_result = bridge.batch_download_media(urls, body.subdir, body.filename_prefix)
+    
+    return {
+        **result,
+        "download": download_result,
+    }
+
+
+@app.post("/video/download")
+def video_download(body: VideoDownloadRequest) -> Dict:
+    # Step 1: Generate video
+    result = bridge.generate_video(
+        body.prompt,
+        body.timeout_seconds,
+        body.poll_attempts,
+        body.poll_interval_seconds,
+    )
+    
+    if not result.get("success") or not result.get("video_urls"):
+        return {
+            **result,
+            "download": {"success": False, "error": "Video generation failed"}
+        }
+    
+    # Step 2: Download videos
+    urls = result.get("video_urls", [])
+    download_result = bridge.batch_download_media(urls, body.subdir, body.filename_prefix)
+    
+    return {
+        **result,
+        "download": download_result,
+    }
 
 
 @app.post("/image-to-video/download")
